@@ -1500,6 +1500,24 @@ def smbus_open(bus_str, po):
         if po.api_type == "i2c":
             from smbus2 import i2c_msg
         return
+    
+    # Implementation for UAB UART-I2C adapters under Linux/Windows
+    m = re.match(r'(ui2c):([a-z\/\\A-Z0-9]+):([0-9]+)', bus_str)
+    if m:
+        # may limit packet size to 32 bytes
+        dev_name = m.group(2)
+        print(dev_name)
+        print(m.group(3))
+        speed = int(m.group(3))
+        po.api_type = "i2c"
+        po.api_sub_type = "ui2c"
+        import ui2c
+        bus = ui2c.UartI2C(dev_name, speed)
+        from ui2c import i2c_msg
+        ui2c.verbose = po.verbose
+        print("UI2C selected")
+        return
+
     raise ValueError("Unrecognized bus definition")
 
 
@@ -1666,8 +1684,18 @@ def smbus_read_block_for_basecmd(bus, dev_addr, cmd, basecmd_name, resp_type, po
           " ".join('{:02x}'.format(x) for x in b)))
 
     if len(b) < b[0] + 1:
-        raise ValueError("Received {} from command {} has invalid length"
-          .format(resp_type,basecmd_name))
+
+        #print("try recover")
+        if(len(b) == 32 and b[0] in (32,33,34,) and po.api_sub_type == "ui2c"):
+            # We've lost last bytes; but there is no other way - accept
+            # the truncated message. Otherwise communicating messages
+            # >  31-byte would just not work
+            if (po.verbose > 0):
+                print("Warning: Response truncated bacause of UI2C v1.0 constrains; adding zeros")
+            b += b'\0' * (b[0]-31)
+        else:
+            raise ValueError("Received {} from command {} has invalid length {}, expected {}, requested {}"
+              .format(resp_type,basecmd_name,len(b), b[0], expect_len))
 
     # check PEC crc-8 byte (unless the packet was so long that we didn't receive it)
     if len(b) >= b[0] + 2:
@@ -3462,7 +3490,9 @@ def main():
             help=("I2C/SMBus bus device selection; 'smbus' will use OS API "
               "prepared for that protocol, while 'i2c' will use I2C messages, "
               "constructing SMBus frames manually; after a colon, bus number "
-              "from your OS has to be provided (defaults to '%(default)s')"))
+              "from your OS has to be provided. 'ui2c:<uart>:<speed>' connects "
+              "through Arduino UART-to-I2C bridge available as <uart> in OS "
+              " (defaults to '%(default)s')"))
 
     parser.add_argument('-a', '--dev_address', default=0x0b, type=lambda x: int(x,0),
             help="target SBS device address (defaults to 0x%(default)x)")
@@ -3636,6 +3666,7 @@ def main():
     vals = {}
 
     po.chip = CHIP_TYPE.from_name(po.chip)
+    po.api_sub_type = ""
 
     po.offline_mode = False
 
